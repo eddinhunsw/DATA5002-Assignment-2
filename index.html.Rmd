@@ -1,0 +1,1183 @@
+---
+title: "Born to Lose? The Hidden Lottery of Making the NHL"
+author: "Edward Dinh"
+date: "24.04.2026"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    css: styles.css
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(leaflet)
+library(plotly)
+library(crosstalk)
+library(broom)
+library(colorspace)
+library(patchwork)
+library(ggrepel)
+```
+
+```{r load-data}
+# Hockey Databank files
+master      <- read_csv("data/Master.csv", locale = locale(encoding = "latin1"))
+scoring     <- read_csv("data/Scoring.csv", locale = locale(encoding = "latin1"))
+goalies     <- read_csv("data/Goalies.csv", locale = locale(encoding = "latin1"))
+awards      <- read_csv("data/AwardsPlayers.csv", locale = locale(encoding = "latin1"))
+
+# Kaggle draft data
+draft       <- read_csv("data/nhldraft.csv", locale = locale(encoding = "latin1"))
+
+# Elite Prospects data
+prospects_dim   <- read_csv("data/player_dim Prospects.csv", locale = locale(encoding = "latin1"))
+prospects_stats <- read_csv("data/player_stats Prospects.csv", locale = locale(encoding = "latin1"))
+
+# Canada cities population data
+canada_cities <- read_excel("data/canadacities Pop Data.xlsx")
+```
+
+```{r prepare-master}
+master_clean <- master %>%
+  filter(!is.na(birthYear), !is.na(birthMon), !is.na(birthDay)) %>%
+  filter(lastNHL >= 1980, firstNHL <= 2016) %>%
+  mutate(
+    birth_date    = make_date(birthYear, birthMon, birthDay),
+    birth_quarter = case_when(
+      birthMon %in% 1:3   ~ "Q1",
+      birthMon %in% 4:6   ~ "Q2",
+      birthMon %in% 7:9   ~ "Q3",
+      birthMon %in% 10:12 ~ "Q4"
+    ),
+    birth_quarter = factor(birth_quarter, levels = c("Q1","Q2","Q3","Q4"))
+  ) %>%
+  select(playerID, firstName, lastName, birth_date, birth_quarter,
+         birthMon, birthCity, birthState, birthCountry, pos, firstNHL, lastNHL)
+```
+
+```{r career-gp}
+# Career NHL games played — skaters
+career_gp_skaters <- scoring %>%
+  filter(lgID == "NHL") %>%
+  group_by(playerID) %>%
+  summarise(career_GP = sum(GP, na.rm = TRUE), .groups = "drop")
+
+# Career NHL games played — goalies
+career_gp_goalies <- goalies %>%
+  filter(lgID == "NHL") %>%
+  group_by(playerID) %>%
+  summarise(career_GP = sum(GP, na.rm = TRUE), .groups = "drop")
+
+# Combine and deduplicate — keep highest career GP where duplicates exist
+career_gp <- bind_rows(career_gp_skaters, career_gp_goalies) %>%
+  group_by(playerID) %>%
+  summarise(career_GP = max(career_GP), .groups = "drop")
+```
+
+```{r allstar-flag}
+allstar_flag <- awards %>%
+  filter(award %in% c("First Team All-Star", "Second Team All-Star"),
+         lgID == "NHL") %>%
+  distinct(playerID) %>%
+  mutate(allstar = 1)
+```
+
+```{r draft-join}
+master_clean <- master_clean %>%
+  mutate(full_name = str_trim(paste(firstName, lastName)))
+
+draft_clean <- draft %>%
+  filter(year >= 1980, year <= 2016) %>%
+  mutate(player = str_trim(player))
+
+# Master as spine
+master_spine <- master_clean %>%
+  left_join(draft_clean, by = c("full_name" = "player")) %>%
+  left_join(career_gp, by = "playerID") %>%
+  left_join(allstar_flag, by = "playerID") %>%
+  mutate(
+    allstar = replace_na(allstar, 0),
+    # Derive decade from firstNHL directly — not from draft year
+    # so ALL players get a decade, not just those who matched the name join
+    decade = case_when(
+      firstNHL >= 1987 & firstNHL <= 1996 ~ "1987–1996",
+      firstNHL >= 1997 & firstNHL <= 2006 ~ "1997–2006",
+      firstNHL >= 2007 & firstNHL <= 2016 ~ "2007–2016"
+    )
+  )
+```
+
+```{r colour-constants}
+# Two-colour convention — Okabe-Ito, colour-blind safe
+COL_OVER    <- "#E69F00"   # orange    — overrepresented / positive / highlight
+COL_UNDER   <- "#0072B2"   # deep blue — underrepresented / negative
+COL_NEUTRAL <- "#999999"   # grey      — background / de-emphasised / no highlight
+
+# Heatmap gradient
+colorscale_hcl <- list(
+  list(0,   "#0072B2"),   # low  — deep blue
+  list(0.5, "#ffffff"),   # mid  — white
+  list(1,   "#E69F00")    # high — orange
+)
+
+```
+
+```{r deduplicate-spine}
+# Deduplicate master_spine — one row per playerID
+# keeping the earliest draft match where a name joins to multiple rows
+master_spine <- master_spine %>%
+  arrange(playerID, year) %>%
+  distinct(playerID, .keep_all = TRUE)
+```
+
+Every year on the 1st of January, a quiet lottery takes place across Canada. 
+No tickets are sold. No names are drawn. But the winners and losers are decided 
+all the same, by birth.
+
+In Canadian youth hockey, the registration year resets on January 1. A child 
+born in January is the oldest in their age group and more 
+physically mature than the child born in November or December of the same year. 
+Coaches see the difference. Scouts see the difference. The older child gets more 
+ice time, better coaching, and more chances to develop. The younger child gets 
+overlooked. This is the Relative Age Effect and in Canadian hockey, it has been 
+running uncorrected for forty years.
+
+The players who fall through this gap are not less talented. They are simply born 
+at the wrong time of year. And the data shows that the ones who make it through 
+anyway, the late survivors, go on to outperform the players the system 
+preferred.
+
+Three of them thread through this story. Rob Blake, Henrik Zetterberg and Corey Crawford, all of who survived the odds to have amazing careers. 
+
+This is the story of why they were nearly missed and how many more like them 
+never got the chance at all. The ones who made it through became some of the most 
+decorated players of their generation. The ones who did not will never be known.
+
+---
+
+## Chapter 1 — The Birthday Lottery
+
+The chart below makes the bias visible. Across 36 years of NHL draft data, players born in the first quarter of the year are drafted at nearly twice the rate of those born in the last. 
+
+If birthday luck played no role, we would expect roughly 25 per cent of players in each quarter. 
+
+
+```{r act1-data}
+act1_data <- master_spine %>%
+  filter(!is.na(year), !is.na(birth_quarter)) %>%
+  count(birth_quarter) %>%
+  mutate(
+    proportion = n / sum(n),
+    expected   = 0.25,
+    deviation  = proportion - expected
+  )
+```
+
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>NHL draftees are disproportionately born early in the year</strong><br>
+<span style="font-size: 0.88em; color: #666666;">Deviation from expected 25% per birth quarter for drafted NHL players, 1980–2016</span>
+</div>
+
+
+```{r act1-plot}
+ggplot(act1_data, aes(x = birth_quarter, y = deviation)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  annotate("text", x = Inf, y = 0.006,
+           label = "Expected (25%)", hjust = 1.1,
+           size = 3, colour = "grey50", fontface = "italic") +
+  geom_segment(
+    aes(x = birth_quarter, xend = birth_quarter, y = 0, yend = deviation),
+    colour    = ifelse(act1_data$deviation > 0, COL_NEUTRAL, COL_UNDER),
+    linewidth = 1.0
+  ) +
+  geom_point(
+    aes(colour = deviation > 0), size = 6
+  ) +
+  geom_text(
+    aes(label = paste0(ifelse(deviation > 0, "+", ""),
+                       scales::percent(deviation, accuracy = 0.1))),
+    vjust = ifelse(act1_data$deviation > 0, -1.2, 1.8),
+    size = 3.5, fontface = "bold", colour = "grey20"
+  ) +
+  scale_colour_manual(
+    values = c("TRUE" = COL_NEUTRAL, "FALSE" = COL_UNDER),
+    guide  = "none"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(-0.12, 0.12)
+  ) +
+  labs(
+    x        = "Birth quarter",
+    y        = "Deviation from expected proportion",
+    caption  = "Source: Hockey Databank; NHL Draft Data (Kaggle)"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title    = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, colour = "grey40"),
+    plot.caption  = element_text(size = 8,  colour = "grey50")
+  )
+```
+
+<div class="callout">
+  <span class="callout-stat">
+    <span style="color: #E69F00;">32%</span><span style="color: #999999;"> vs </span><span style="color: #0072B2;">17%</span>
+  </span>
+  One in three NHL players was born in the first quarter of the year. 
+  One in six was born in the last. That gap is not talent, it is a calendar.
+</div>
+
+Rob Blake was born in December. Corey Crawford was born on December 31,  the 
+very last day of the year. Henrik Zetterberg was born in October. All three sit 
+in that underrepresented blue zone to the right of this chart. All three almost 
+did not make it. Hundreds like them did not.
+
+But the birthday bias does not operate in isolation. Where you grow up in Canada compounds it and the gap between cities is wider than you might expect.
+
+
+## Chapter 2 — It Gets Worse
+
+Canada is not a single hockey market. It is hundreds of them from Toronto and Montreal, where competition for youth spots is fierce, to small towns where the rink is the only one for fifty kilometres.
+
+The map below shows how many NHL players each Canadian city produces per 100,000 residents. Smaller cities punch above their weight.
+
+
+```{r act2-data}
+canadian_players <- master_spine %>%
+  filter(birthCountry == "Canada", !is.na(birthCity), !is.na(birthState))
+
+city_counts <- canadian_players %>%
+  count(birthCity, birthState, name = "player_count")
+
+act2_data <- city_counts %>%
+  left_join(canada_cities,
+            by = c("birthCity" = "city_ascii", "birthState" = "province_id")) %>%
+  filter(!is.na(population), !is.na(lat), !is.na(lng)) %>%
+  mutate(
+    players_per_100k  = (player_count / population) * 100000,
+    expected_per_100k = sum(player_count) / sum(population) * 100000,
+    ratio             = players_per_100k / expected_per_100k
+  )
+```
+
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>Small towns punch above their weight in producing NHL talent</strong><br>
+<span style="font-size: 0.88em; color: #666666;">NHL players per 100,000 residents by Canadian city — bubble size reflects population, 1980–2016.</span><br>
+<span style="font-size: 0.82em; color: #0072B2;">Hover and click for details.</span>
+</div>
+
+```{r act2-map}
+act2_map_data <- act2_data %>%
+  filter(player_count >= 3) %>%
+  mutate(per100k_capped = pmin(players_per_100k, 50))
+
+pal <- colorNumeric(
+  palette = c(COL_NEUTRAL, COL_UNDER),
+  domain  = act2_map_data$per100k_capped
+)
+
+leaflet(act2_map_data) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    lng         = ~lng,
+    lat         = ~lat,
+    radius      = ~sqrt(population / 10000) * 1.5,
+    fillColor   = ~pal(per100k_capped),
+    fillOpacity = 0.8,
+    color       = "white",
+    weight      = 0.5,
+    popup = ~paste0(
+      "<b>", birthCity, ", ", birthState, "</b><br>",
+      "Population: ",       scales::comma(population), "<br>",
+      "NHL players: ",      player_count, "<br>",
+      "Players per 100k: ", round(players_per_100k, 1), "<br>",
+      "<i style='color:grey;font-size:0.85em;'>Bubble size reflects city population</i>"
+    ),
+    label = ~paste0(birthCity, " — click for details")
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal      = pal,
+    values   = ~per100k_capped,
+    title    = "NHL players per<br>100,000 people",
+    opacity  = 0.3
+  )
+```
+
+But in Canada's high population cities, competition is so intense that being born late in the year costs more precisely where the talent pool runs deepest.
+
+```{r act2-dumbbell-data}
+act2_dumbbell <- canadian_players %>%
+  left_join(canada_cities,
+            by = c("birthCity" = "city_ascii", "birthState" = "province_id")) %>%
+  filter(!is.na(population)) %>%
+  mutate(
+    city_tier = case_when(
+      population >= 500000  ~ "Major metro",
+      population >= 100000  ~ "Mid-size city",
+      TRUE                  ~ "Small town"
+    ),
+    city_tier = factor(city_tier,
+                       levels = c("Small town","Mid-size city","Major metro"))
+  ) %>%
+  group_by(city_tier, birth_quarter) %>%
+  summarise(n = n_distinct(playerID), .groups = "drop") %>%
+  group_by(city_tier) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  filter(birth_quarter %in% c("Q1","Q4"))
+```
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>The bigger the city, the wider the birthday gap</strong><br>
+<span style="font-size: 0.88em; color: #666666;">Delta between Q1 and Q4 representation among Canadian NHL players by city size, 1980–2016</span>
+</div>
+
+
+```{r act2-dumbbell-plot}
+act2_wide <- act2_dumbbell %>%
+  pivot_wider(names_from = birth_quarter, values_from = prop,
+              id_cols = city_tier) %>%
+  mutate(gap = Q1 - Q4)
+
+ggplot() +
+  geom_segment(data = act2_wide,
+               aes(x = Q4, xend = Q1, y = city_tier, yend = city_tier),
+               colour = "grey75", linewidth = 2) +
+  geom_point(data = act2_dumbbell %>% filter(birth_quarter == "Q1"),
+             aes(x = prop, y = city_tier, shape = "Q1"),
+             colour = "grey60", size = 6) +
+  geom_point(data = act2_dumbbell %>% filter(birth_quarter == "Q4"),
+             aes(x = prop, y = city_tier, shape = "Q4"),
+             colour = "grey60", size = 7) +
+  geom_text(data = act2_wide,
+            aes(x = (Q1 + Q4) / 2, y = city_tier,
+                label = paste0("\u0394 ", scales::percent(gap, accuracy = 0.1))),
+            vjust = -1.2, size = 3.8, fontface = "plain", colour = COL_UNDER) +
+  scale_shape_manual(values = c("Q1" = 16, "Q4" = 18), name = NULL) +
+  scale_x_continuous(
+    limits = c(0.12, 0.44),
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  scale_y_discrete(labels = c(
+    "Major metro"   = "Major metro\n(500k+)",
+    "Mid-size city" = "Mid-size city\n(100k–500k)",
+    "Small town"    = "Small town\n(under 100k)"
+  )) +
+  labs(
+    x       = "Proportion of players drafted",
+    y       = "City tier",
+    caption = "Source: Hockey Databank; SimpleMaps Canada Cities."
+  ) +
+  theme_classic() +
+  theme(
+    plot.caption       = element_text(size = 8,  colour = "grey50"),
+    axis.text.y        = element_text(size = 10, face = "plain"),
+    axis.title.y       = element_text(size = 10, colour = "grey40"),
+    panel.grid.major.y = element_blank(),
+    legend.position    = "bottom",
+    legend.direction   = "horizontal",
+    legend.text        = element_text(size = 9, colour = "grey40")
+  )
+```
+
+<div class="callout">
+  <span class="callout-stat">Δ 15.4%</span>
+  In major Canadian cities, Q1-born players outnumber Q4-born players by 
+  15 percentage points. In small towns, that gap narrows to 10.6 points. 
+  The more competitive the market, the wider the birthday gap.
+</div>
+
+Corey Crawford grew up in Montreal, the city where this gap is steepest. Born on December 31, he was the last child of that year in one of Canada's most competitive hockey markets. The system demanded more from him before it would even consider him. He delivered. Most do not get the chance.
+
+
+## Chapter 3 — This Isn't Random
+
+Perhaps this is a recent phenomenon. Perhaps it only affects certain positions or nationalities. Perhaps the sport's growing analytical sophistication has begun to correct it. The heatmap below tests all three.
+
+```{r act3-data}
+act3_data <- master_spine %>%
+  filter(!is.na(birth_quarter), !is.na(decade)) %>%
+  group_by(decade, birth_quarter) %>%
+  summarise(n = n_distinct(playerID), .groups = "drop") %>%
+  group_by(decade) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+```
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>The birth quarter distribution of NHL draftees has remained consistent across three decades</strong><br>
+<span style="font-size: 0.88em; color: #666666;">Proportion of NHL players per birth quarter by decade, 1987–2016.</span><br>
+<span style="font-size: 0.82em; color: #0072B2;">↓ Use the dropdowns to filter by nationality and position.</span>
+</div>
+
+
+
+```{r act3-heatmap}
+library(colorspace)
+
+make_matrix <- function(df) {
+  df %>%
+    filter(!is.na(birth_quarter), !is.na(decade)) %>%
+    mutate(birth_quarter = as.character(birth_quarter)) %>%
+    group_by(decade, birth_quarter) %>%
+    summarise(n = n_distinct(playerID), .groups = "drop") %>%
+    pivot_wider(names_from = birth_quarter, values_from = n, values_fill = 0) %>%
+    mutate(
+      Q1 = if ("Q1" %in% names(.)) Q1 else 0L,
+      Q2 = if ("Q2" %in% names(.)) Q2 else 0L,
+      Q3 = if ("Q3" %in% names(.)) Q3 else 0L,
+      Q4 = if ("Q4" %in% names(.)) Q4 else 0L
+    ) %>%
+    select(decade, Q1, Q2, Q3, Q4) %>%
+    mutate(
+      row_total = Q1 + Q2 + Q3 + Q4,
+      Q1 = Q1 / row_total,
+      Q2 = Q2 / row_total,
+      Q3 = Q3 / row_total,
+      Q4 = Q4 / row_total
+    ) %>%
+    select(decade, Q1, Q2, Q3, Q4) %>%
+    arrange(decade)
+}
+
+spine <- master_spine %>%
+  mutate(pos_group = case_when(
+    str_detect(pos, "G") ~ "G",
+    str_detect(pos, "D") ~ "D",
+    TRUE                 ~ "F"
+  ))
+
+nat_levels <- list(
+  "All nationalities" = spine,
+  "Canada"            = spine %>% filter(birthCountry == "Canada"),
+  "USA"               = spine %>% filter(birthCountry == "USA"),
+  "Europe / Other"    = spine %>% filter(!birthCountry %in% c("Canada","USA"))
+)
+
+pos_levels <- list(
+  "All positions" = function(d) d,
+  "Forwards"      = function(d) d %>% filter(pos_group == "F"),
+  "Defencemen"    = function(d) d %>% filter(pos_group == "D"),
+  "Goalies"       = function(d) d %>% filter(pos_group == "G")
+)
+
+subsets <- list(); subset_labels <- c(); idx <- 1
+for (ni in seq_along(nat_levels)) {
+  for (pi in seq_along(pos_levels)) {
+    subsets[[idx]] <- pos_levels[[pi]](nat_levels[[ni]])
+    subset_labels[idx] <- paste(names(nat_levels)[ni], "/", names(pos_levels)[pi])
+    idx <- idx + 1
+  }
+}
+n_tot <- length(subsets)
+
+# HCL sequential palette — colour-blind safe
+hcl_cols     <- sequential_hcl(100, palette = "YlOrBr")
+colorscale_hcl <- list(
+  list(0,   "#f0f0f0"),    # low  — light grey
+  list(0.5, "#6baed6"),    # mid  — medium blue
+  list(1,   COL_UNDER)     # high — deep blue
+)
+
+p_heatmap <- plot_ly()
+
+for (i in seq_len(n_tot)) {
+  m        <- make_matrix(subsets[[i]])
+  z_mat    <- as.matrix(m[, c("Q1","Q2","Q3","Q4")])
+  text_mat <- apply(z_mat, c(1,2),
+                    function(v) scales::percent(v, accuracy = 0.1))
+
+  p_heatmap <- p_heatmap %>% add_heatmap(
+    x             = c("Q1","Q2","Q3","Q4"),
+    y             = m$decade,
+    z             = z_mat,
+    text          = text_mat,
+    texttemplate  = "%{text}",
+    showscale     = TRUE,
+    colorscale    = colorscale_hcl,
+    zmin          = 0.00,
+    zmax          = 0.40,
+    colorbar      = list(
+      title      = list(text = "Proportion<br>of players",
+                        font = list(size = 11)),
+      tickformat = ".0%",
+      len        = 0.9,
+      lenmode    = "fraction",
+      thickness  = 15,
+      x          = 1.02,
+      xanchor    = "left",
+      y          = 0.5,
+      yanchor    = "middle"
+    ),
+    visible       = (i == 1),
+    name          = subset_labels[i],
+    hovertemplate = "<b>%{y} — %{x}</b><br>Proportion: %{text}<extra></extra>"
+  )
+}
+
+make_vis <- function(i) {
+  v <- rep(FALSE, n_tot); v[i] <- TRUE; v
+}
+
+nat_buttons <- lapply(seq_along(nat_levels), function(ni) {
+  list(method = "update",
+       label  = names(nat_levels)[ni],
+       args   = list(list(visible = make_vis((ni - 1) * 4 + 1))))
+})
+
+pos_buttons <- lapply(seq_along(pos_levels), function(pi) {
+  list(method = "update",
+       label  = names(pos_levels)[pi],
+       args   = list(list(visible = make_vis(pi))))
+})
+
+p_heatmap %>% layout(
+  font = list(family = "sans-serif", size = 12, colour = "#2c2c2c"),
+  title = list(
+
+    font    = list(size = 13, family = "sans-serif"),
+    x       = 0.02,
+    xanchor = "left",
+    y       = 0.98,
+    yanchor = "top"
+  ),
+  xaxis = list(
+    title = list(
+      text = "Birth quarter",
+      font = list(size = 11, color = "grey40")
+    )
+  ),
+  yaxis = list(
+    title = list(
+      text = "Decade",
+      font = list(size = 11, color = "grey40")
+    )
+  ),
+  margin = list(t = 120, l = 80, r = 100, b = 60),
+  font   = list(family = "sans-serif"),
+  updatemenus = list(
+      list(
+        type        = "dropdown", direction  = "down",
+        x           = 0.00,      y          = 1.55,
+        xanchor     = "left",    yanchor    = "top",
+        showactive  = TRUE,      buttons    = nat_buttons,
+        bgcolor     = "#f8f9fa", bordercolor = "#adb5bd",
+        borderwidth = 1,
+        font        = list(size = 10),
+        pad         = list(t = 2, b = 2, l = 4, r = 4)
+      ),
+      list(
+        type        = "dropdown", direction  = "down",
+        x           = 0.50,      y          = 1.55,
+        xanchor     = "left",    yanchor    = "top",
+        showactive  = TRUE,      buttons    = pos_buttons,
+        bgcolor     = "#f8f9fa", bordercolor = "#adb5bd",
+        borderwidth = 1,
+        font        = list(size = 10),
+        pad         = list(t = 2, b = 2, l = 4, r = 4)
+      )
+    ),
+  annotations = list(
+    list(
+      text      = "Nationality:", x = 0.00, y = 1.65,
+      xref      = "paper",        yref = "paper",
+      showarrow = FALSE,          font = list(size = 11),
+      xanchor   = "left"
+    ),
+    list(
+      text      = "Position:",   x = 0.50, y = 1.65,
+      xref      = "paper",       yref = "paper",
+      showarrow = FALSE,         font = list(size = 11),
+      xanchor   = "left"
+    )
+  )
+)
+```
+
+The answer is the same for almost every filter applied. Q1 has accounted for roughly 32 per cent of every NHL cohort since 1987. Q4 has never exceeded 20. For goalies, the bias is even starker with Q4-born goaltenders make up just 10 per cent of drafted NHL goalies in the between 2007 and 2016 . The system filters late-born players ruthlessly. For goalies, it is almost total.
+
+<div class="callout">
+  <span class="callout-stat">Three decades. Zero correction.</span>
+  From 1987 to 2016, Q1 players have consistently made up roughly 32 per cent 
+  of every NHL cohort. Q4 players have consistently made up roughly 18 per cent. 
+  This is not a recent mistake waiting to be fixed. It is a structural feature 
+  of how hockey talent has been identified for forty years.
+</div>
+
+Corey Crawford born December 31, in Montreal, sits in the coolest cell of every filter you select. In the most recent decade, only one in ten Canadian goalies was born in Q4. He was one of them. He won the Stanley Cup twice.
+
+But here is what the heatmap cannot show. The players who survived this system did not simply match their early-born counterparts. They outperformed them.
+
+They outperformed them.
+
+## Chapter 4 — The Twist
+
+For four decades, the system filtered late-born players out. At youth level, at junior level, at the draft. The players who made it through anyway had to be exceptional not just good enough to be selected, but good enough to be impossible to ignore. So what happened to them once they got there?
+
+```{r act4-data}
+act4_allstar <- master_spine %>%
+  filter(!is.na(birth_quarter)) %>%
+  group_by(birth_quarter) %>%
+  summarise(
+    total_players   = n_distinct(playerID),
+    allstar_players = sum(allstar, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    allstar_rate = allstar_players / total_players,
+    expected     = sum(allstar_players) / sum(total_players)
+  )
+
+act4_gp <- master_spine %>%
+  filter(!is.na(birth_quarter), !is.na(career_GP)) %>%
+  group_by(birth_quarter) %>%
+  summarise(
+    avg_career_GP = mean(career_GP, na.rm = TRUE),
+    se            = sd(career_GP,   na.rm = TRUE) / sqrt(n()),
+    .groups       = "drop"
+  )
+```
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>Late-born survivors reach elite level at a higher rate</strong><br>
+<span style="font-size: 0.88em; color: #666666;">All-Star selection rate by birth quarter — NHL players active 1980–2016.</span> <br>
+</div>
+
+
+
+
+```{r act4-allstar-plot}
+overall_allstar <- act4_allstar$expected[1]
+
+ggplot(act4_allstar,
+       aes(x = birth_quarter, y = allstar_rate,
+           fill = birth_quarter == "Q3")) +
+  geom_col(width = 0.65) +
+  geom_hline(yintercept = overall_allstar,
+             linetype = "dashed", colour = "grey40", linewidth = 0.5) +
+  annotate("text", x = Inf, y = overall_allstar + 0.0008,
+           label = "Overall avg", hjust = 1.1,
+           size = 2.8, colour = "grey50", fontface = "italic") +
+  geom_text(aes(label = scales::percent(allstar_rate, accuracy = 0.1)),
+            vjust = -0.5, size = 3.5, fontface = "bold", colour = "grey20") +
+  scale_fill_manual(
+    values = c("TRUE" = COL_UNDER, "FALSE" = COL_NEUTRAL),
+    guide  = "none"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 0.068),
+    labels = scales::percent_format(accuracy = 0.1)
+  ) +
+  labs(
+    x       = "Birth quarter",
+    y       = "All-Star selection rate",
+    caption = "Source: Hockey Databank. Dashed line = overall All-Star rate."
+  ) +
+  theme_classic() +
+  theme(
+    plot.title    = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, colour = "grey40"),
+    plot.caption  = element_text(size = 8,  colour = "grey50")
+  )
+```
+
+
+Q3-born players reach All-Star level at the highest rate of any birth quarter, 5.1 per cent versus 3.3 per cent for Q1. The system spent decades favouring Q1 players. The data suggests it consistently picked the wrong ones.
+
+Q4 players match Q1's All-Star rate exactly however, a Q4 player with an All-Star selection cleared a higher bar at every stage just to reach the NHL. Rob Blake won four. He was born in December.
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>Once in the league, Q3 and Q4 players have the longest careers</strong><br>
+<span style="font-size: 0.88em; color: #666666;">Average NHL career games played by birth quarter — players active 1980–2016</span> <br>
+</div>
+
+```{r act4-gp-plot}
+overall_avg_gp <- mean(master_spine$career_GP, na.rm = TRUE)
+
+ggplot(act4_gp, aes(x = birth_quarter, y = avg_career_GP)) +
+  geom_col(aes(fill = birth_quarter == "Q4"), width = 0.6) +
+  geom_hline(yintercept = overall_avg_gp,
+             linetype = "dashed", colour = "grey40") +
+  geom_text(aes(label = round(avg_career_GP, 0)),
+            vjust = -0.5, size = 3.5, fontface = "bold", colour = "grey30") +
+  scale_fill_manual(values = c("TRUE" = COL_UNDER, "FALSE" = COL_NEUTRAL),
+                    guide = "none") +
+  scale_y_continuous(limits = c(0, 380), labels = scales::comma) +
+  labs(
+
+    x        = "Birth quarter",
+    y        = "Average career games played",
+    caption  = "Source: Hockey Databank. Dashed line = overall average."
+  ) +
+  theme_classic() +
+  theme(
+    plot.title    = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, colour = "grey40"),
+    plot.caption  = element_text(size = 8, colour = "grey50")
+  )
+```
+
+
+Games played is the most honest measure of NHL value. Every season, teams cut players who are not good enough and sign players who are. A player with 400 career games has survived that judgment dozens of times. Q4-born players average 42 more career games than Q1. The system kept picking them, it just did not do it at the draft.
+
+The chart below tests this statistically. Each point shows the estimated difference in All-Star likelihood for that birth quarter compared to a Q1-born player in the same position and era. Points to the right of zero mean higher odds than Q1. The horizontal lines show the uncertainty range , if the line crosses zero, the result could be chance. If it does not, it is statistically significant.
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>Q3-born players are statistically more likely to be an All-Star</strong><br>
+<span style="font-size: 0.88em; color: #666666;">Logistic regression coefficients vs Q1 — controlling for position and draft era</span> <br>
+</div>
+
+
+```{r act4-logistic}
+model_act4 <- glm(
+  allstar ~ birth_quarter + pos + firstNHL,
+  data   = master_spine %>%
+    filter(!is.na(birth_quarter), !is.na(pos), !is.na(firstNHL)),
+  family = binomial
+)
+
+coef_data <- tidy(model_act4, conf.int = TRUE) %>%
+  filter(str_detect(term, "birth_quarter")) %>%
+  mutate(
+    term        = str_replace(term, "birth_quarter", ""),
+    significant = p.value < 0.05
+  ) %>%
+  arrange(estimate) %>%
+  mutate(term = factor(term, levels = term))
+
+ggplot(coef_data, aes(x = estimate, y = term)) +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             colour = "grey40", linewidth = 0.5) +
+  geom_pointrange(
+    aes(xmin   = conf.low,
+        xmax   = conf.high,
+        colour = significant),
+    linewidth = 0.8,
+    size      = 0.8
+  ) +
+
+  scale_colour_manual(
+    values = c("TRUE"  = COL_UNDER,
+               "FALSE" = COL_NEUTRAL),
+    labels = c("TRUE"  = "Significant (p < 0.05)",
+               "FALSE" = "Not significant"),
+    name   = NULL
+  ) +
+  scale_y_discrete(expand = expansion(add = c(0.5, 0.8))) +
+  labs(
+
+    x        = "Log-odds relative to Q1-born players",
+    y        = "Birth quarter",
+    caption  = "Source: Hockey Databank."
+  ) +
+  theme_classic() +
+  theme(
+    plot.title      = element_text(face = "bold", size = 13),
+    plot.subtitle   = element_text(size = 10, colour = "grey40"),
+    plot.caption    = element_text(size = 8,  colour = "grey50"),
+    legend.position = "bottom"
+  )
+```
+
+
+The model confirms it. Controlling for position and era, Q3-born players are statistically more likely to earn All-Star recognition than Q1-born players with identical profiles.
+
+<div class="callout">
+  <span class="callout-stat">The system picked the wrong players.</span>
+  Q3-born players reach All-Star level 55% more often than Q1. 
+  Q4-born players play 42 more career games. The players the 
+  draft trusted least turned out to be its most durable and 
+  its most decorated.
+</div>
+
+But recognising the pattern after the fact is only half the story. The more important question is whether it was predictable and whether anyone can exploit it. The data has always been there.
+
+## Chapter 5 — The Diamond in the Rough
+
+Late-born players outperform once inside the league. But was that predictable before they were drafted?
+
+
+The data says yes and the signal was sitting in the junior statistics the whole time. A Q4 player producing 1.0 points per game in juniors is not a borderline talent. They are matching Q1 production at a younger developmental age. The scatter below shows where the diamonds are hiding.
+
+```{r act5-data}
+JUNIOR_LEAGUES <- c("WHL","OHL","QMJHL","USHL","BCHL","AJHL","NAHL","NCAA")
+
+prospects_bq <- prospects_dim %>%
+  mutate(
+    DATE_OF_BIRTH = as.character(DATE_OF_BIRTH),
+    DRAFT_YEAR    = as.character(DRAFT_YEAR),
+    DRAFT_OVERALL = as.character(DRAFT_OVERALL),
+    PLAYER_ID     = as.character(PLAYER_ID)
+  ) %>%
+  filter(
+    !is.na(DRAFT_YEAR),    DRAFT_YEAR    != "NA",
+    !is.na(DRAFT_OVERALL), DRAFT_OVERALL != "NA",
+    !is.na(DATE_OF_BIRTH), DATE_OF_BIRTH != "NA",
+    !is.na(PLAYER_ID)
+  ) %>%
+  mutate(
+    birth_month   = as.integer(substr(DATE_OF_BIRTH, 6, 7)),
+    birth_quarter = case_when(
+      birth_month %in% 1:3   ~ "Q1",
+      birth_month %in% 4:6   ~ "Q2",
+      birth_month %in% 7:9   ~ "Q3",
+      birth_month %in% 10:12 ~ "Q4"
+    ),
+    birth_quarter = factor(birth_quarter, levels = c("Q1","Q2","Q3","Q4")),
+    DRAFT_YEAR    = as.integer(DRAFT_YEAR),
+    DRAFT_OVERALL = as.integer(as.numeric(DRAFT_OVERALL))
+  ) %>%
+  filter(!is.na(birth_month), !is.na(birth_quarter),
+         DRAFT_YEAR >= 1996, DRAFT_YEAR <= 2016) %>%
+  select(PLAYER_ID, DRAFT_YEAR, DRAFT_OVERALL, birth_quarter, birth_month)
+
+prospects_predraft <- prospects_stats %>%
+  mutate(PLAYER_ID = as.character(PLAYER_ID),
+         GP        = as.numeric(GP),
+         PPG       = as.numeric(PPG)) %>%
+  filter(LEAGUE %in% JUNIOR_LEAGUES, !is.na(PPG), !is.na(GP), GP >= 20) %>%
+  inner_join(
+    prospects_bq %>% mutate(pre_season = paste0(DRAFT_YEAR - 1, "-", DRAFT_YEAR)),
+    by = "PLAYER_ID"
+  ) %>%
+  filter(LEAGUE_YEAR == pre_season) %>%
+  group_by(PLAYER_ID) %>%
+  slice_max(PPG, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+master_name_lookup <- master_spine %>%
+  select(full_name, career_GP, allstar) %>%
+  group_by(full_name) %>%
+  slice_max(career_GP, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+act5_data <- prospects_predraft %>%
+  mutate(full_name = str_trim(paste(FIRST_NAME, LAST_NAME))) %>%
+  left_join(master_name_lookup, by = "full_name") %>%
+  mutate(
+    career_GP = replace_na(career_GP, 0),
+    made_it   = career_GP >= 200,
+    nhl_tier  = case_when(
+      career_GP == 0   ~ "Never made NHL",
+      career_GP < 100  ~ "< 100 GP",
+      career_GP < 400  ~ "100–400 GP",
+      TRUE             ~ "400+ GP"
+    ),
+    nhl_tier = factor(nhl_tier,
+                      levels = c("Never made NHL","< 100 GP",
+                                 "100–400 GP","400+ GP"))
+  ) %>%
+  group_by(PLAYER_ID) %>%
+  slice_max(career_GP, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(full_name, DRAFT_OVERALL, DRAFT_YEAR, birth_quarter, birth_month,
+         PPG, GP, LEAGUE, career_GP, allstar, nhl_tier, made_it)
+
+```
+
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>Q4 born players with strong junior PPG disproportionately have longer careers</strong><br>
+<span style="font-size: 0.88em; color: #666666;">Pre-draft junior PPG vs NHL career GP by birth quarter — draftees 1996–2016</span><br>
+<span style="font-size: 0.82em; color: #0072B2;">Shaded zone = PPG 0.8–1.2. Click to zoom</span>
+</div>
+
+
+```{r act5-zone-scatter}
+act5_zone <- act5_data %>%
+  mutate(
+    colour_group = case_when(
+      birth_quarter == "Q1" ~ "Q1",
+      birth_quarter == "Q4" ~ "Q4",
+      TRUE                  ~ "Q2 / Q3"
+    ),
+    colour_group = factor(colour_group,
+                          levels = c("Q1", "Q4", "Q2 / Q3")),
+    tooltip = paste0(
+      full_name, "\n",
+      "Birth quarter: ", birth_quarter, "\n",
+      "Pre-draft PPG: ", round(PPG, 2), "\n",
+      "NHL career GP: ", career_GP
+    )
+  )
+
+p_zone <- ggplot(act5_zone,
+                 aes(x = PPG, y = career_GP,
+                     colour = colour_group,
+                     text   = tooltip)) +
+  # Shaded zone PPG 0.8-1.2 — darker fill
+  annotate("rect", xmin = 0.8, xmax = 1.2,
+           ymin = 0, ymax = Inf,
+           fill = "grey70", alpha = 0.25) +
+  # Zone boundary lines — no end markers
+  geom_vline(xintercept = c(0.8, 1.2), linetype = "dashed",
+             colour = "grey50", linewidth = 0.3) +
+  # Invisible point to force Q1 into legend
+  geom_point(
+    data = data.frame(
+      PPG          = NA_real_,
+      career_GP    = NA_real_,
+      colour_group = factor("Q1", levels = levels(act5_zone$colour_group)),
+      tooltip      = ""
+    ),
+    aes(x = PPG, y = career_GP, colour = colour_group, text = tooltip),
+    size = 0
+  ) +
+  # Q2/Q3 — neutral grey, bottom layer
+  geom_point(data = act5_zone %>% filter(birth_quarter %in% c("Q2","Q3")),
+             size = 2, alpha = 0.25) +
+  # Q4 — blue, middle layer
+  geom_point(data = act5_zone %>% filter(birth_quarter == "Q4"),
+             size = 2.8, alpha = 0.75) +
+  # Q1 — orange, top layer
+  geom_point(data = act5_zone %>% filter(birth_quarter == "Q1"),
+             size = 2.8, alpha = 0.75) +
+  scale_colour_manual(
+    values = c(
+      "Q1"     = COL_OVER,
+      "Q4"     = COL_UNDER,
+      "Q2 / Q3" = COL_NEUTRAL
+    ),
+    name = ""
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 2.5, 0.5),
+    limits = c(0, 2.7)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 1100, 200),
+    labels = scales::comma
+  ) +
+  labs(
+    x       = "Pre-draft junior PPG",
+    y       = "NHL career games played",
+    caption = "Source: Elite Prospects; Hockey Databank."
+  ) +
+  theme_classic() +
+  theme(
+    plot.title      = element_text(face = "bold", size = 13),
+    plot.subtitle   = element_text(size = 10, colour = "grey40"),
+    plot.caption    = element_text(size = 8,  colour = "grey50"),
+    legend.position = "none"
+  )
+
+ggplotly(p_zone, tooltip = "text") %>%
+  layout(
+    font = list(family = "sans-serif", size = 14, colour = "#2c2c2c"),
+    title = list(
+      font    = list(size = 13, family = "sans-serif"),
+      x       = 0.02,
+      xanchor = "left"
+    ),
+    margin = list(t = 80, b = 130),
+    legend = list(
+      orientation   = "h",
+      x             = 0.5,
+      xanchor       = "center",
+      y             = -0.30,
+      yanchor       = "top",
+      font          = list(size = 11),
+      tracegroupgap = 0,
+      itemsizing    = "constant"
+    ),
+    showlegend = TRUE
+  ) %>%
+  style(marker.size = 0, marker.opacity = 0, traces = 1) %>%
+  style(marker.size = 8, traces = 2) %>%
+  style(marker.size = 8, traces = 3) %>%
+  style(marker.size = 8, traces = 4)
+```
+
+```{r act5-crossover-data}
+baseline <- act5_data %>%
+  count(birth_quarter) %>%
+  mutate(prop = n / sum(n), gp_label = "All draftees\n(baseline)") %>%
+  filter(birth_quarter %in% c("Q1","Q4")) %>%
+  select(gp_label, birth_quarter, prop)
+
+zone_milestones <- map_dfr(
+  list(
+    list(label = "0+ GP\n(entered NHL)", min_gp = 0),
+    list(label = "200+ GP",              min_gp = 200),
+    list(label = "400+ GP",              min_gp = 400),
+    list(label = "750+ GP",              min_gp = 750)
+  ),
+  function(m) {
+    act5_data %>%
+      filter(PPG >= 0.8, PPG <= 1.2, career_GP >= m$min_gp) %>%
+      count(birth_quarter) %>%
+      mutate(prop = n / sum(n), gp_label = m$label) %>%
+      filter(birth_quarter %in% c("Q1","Q4")) %>%
+      select(gp_label, birth_quarter, prop)
+  }
+)
+
+act5_cross <- bind_rows(baseline, zone_milestones) %>%
+  mutate(
+    gp_label = factor(gp_label,
+                      levels = c("All draftees\n(baseline)",
+                                 "0+ GP\n(entered NHL)",
+                                 "200+ GP",
+                                 "400+ GP",
+                                 "750+ GP")),
+    birth_quarter = factor(as.character(birth_quarter), levels = c("Q1","Q4")),
+    label = scales::percent(prop, accuracy = 0.1)
+  ) %>%
+  droplevels()
+```
+
+Players producing between 0.8 and 1.2 points per game, these are the players scouts debate. The chart below shows what happened to them as their careers progress.
+
+<div style="border-left: 3px solid #0072B2; padding-left: 12px; margin: 20px 0 4px 0;">
+<strong>The draft favours Q1. Long careers favour Q4.</strong><br>
+<span style="font-size: 0.88em; color: #666666;">Q1 vs Q4 share at each career milestone — players with pre-draft PPG 0.8–1.2 only</span> <br>
+</div>
+
+
+```{r act5-crossover-line}
+ggplot(act5_cross,
+       aes(x      = gp_label,
+           y      = prop,
+           group  = birth_quarter,
+           colour = birth_quarter)) +
+  geom_line(linewidth = 1.4) +
+  geom_point(size = 4) +
+  geom_text(
+    data = act5_cross %>%
+      filter(gp_label %in% c("All draftees\n(baseline)", "750+ GP")),
+    aes(label = label),
+    vjust = -1.0, size = 3, fontface = "bold",
+    show.legend = FALSE
+  ) +
+  scale_colour_manual(
+    values = c("Q1" = "#E69F00", "Q4" = "#0072B2"),
+    labels = c("Q1" = "Q1", "Q4" = "Q4"),
+    name   = NULL
+  ) +
+  scale_y_continuous(
+    limits = c(0.03, 0.47),
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  scale_x_discrete(expand = expansion(add = c(0.3, 0.7))) +
+  labs(
+    x       = "Career games played threshold",
+    y       = "Share of players at each milestone",
+    colour  = NULL,
+    caption = "Source: Elite Prospects; Hockey Databank. Baseline includes all draftees regardless of PPG."
+  ) +
+  theme_classic() +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.subtitle    = element_text(size = 10, colour = "grey40"),
+    plot.caption     = element_text(size = 8,  colour = "grey50"),
+    axis.text.x      = element_text(size = 9,  face = "bold"),
+    legend.position  = "bottom",
+    legend.direction = "horizontal",
+    legend.text      = element_text(size = 9, colour = "grey40")
+  )
+```
+
+<div class="callout">
+  <span class="callout-stat">
+    <span style="color: #0072B2;">37.5%</span><span style="color: #999999;"> vs </span><span style="color: #E69F00;">6.2%</span>
+  </span>
+  Among players with pre-draft junior PPG between 0.8 and 1.2, Q4-born players 
+  make up 37.5 per cent of those who go on to play 750 or more NHL games. 
+  Q1-born players make up just 6.2 per cent. The draft selected Q1 players at 
+  nearly twice the rate. The scoreboard tells a different story entirely.
+</div>
+
+Henrik Zetterberg was at that level in the Swedish junior leagues when Detroit took him 210th overall. He played 1,082 NHL games. The signal was there. Thirty teams missed it.
+
+## Chapter 6 — The Implications
+
+Three players. Three birth months in the back half of the calendar. Three careers that should not have happened according to the system that nearly filtered them out.
+
+```{r act6-cards}
+htmltools::HTML('
+<div class="player-card-container">
+
+  <div class="player-card">
+    <div class="player-name">Rob Blake</div>
+    <div class="player-stat">🎂 Born December 10, 1969 — Simcoe, Ontario</div>
+    <div class="player-stat">📋 Pick <span class="player-highlight">#70</span> — Los Angeles Kings, 1988</div>
+    <div class="player-stat">🏒 1,270 NHL games played</div>
+    <div class="player-stat">🏆 4× All-Star · Norris Trophy · Stanley Cup · Hall of Fame</div>
+    <div class="player-tagline">
+      The best defenceman of his generation. Drafted in the fourth round 
+      because he was born in December. The 69 players taken before him 
+      combined for fewer All-Star appearances than he earned alone.
+    </div>
+  </div>
+
+  <div class="player-card">
+    <div class="player-name">Henrik Zetterberg</div>
+    <div class="player-stat">🎂 Born October 9, 1980 — Njurunda, Sweden</div>
+    <div class="player-stat">📋 Pick <span class="player-highlight">#210</span> — Detroit Red Wings, 1999</div>
+    <div class="player-stat">🏒 1,082 NHL games played</div>
+    <div class="player-stat">🏆 Stanley Cup · Conn Smythe Trophy · 1× All-Star</div>
+    <div class="player-tagline">
+      Passed over by every team for seven full rounds. His pre-draft 
+      junior production justified a first or second round selection. 
+      Detroit finally took him 210th. He became their franchise player 
+      and won the Conn Smythe as playoff MVP.
+    </div>
+  </div>
+
+  <div class="player-card">
+    <div class="player-name">Corey Crawford</div>
+    <div class="player-stat">🎂 Born December 31, 1984 — Montreal, Quebec</div>
+    <div class="player-stat">📋 Pick <span class="player-highlight">#52</span> — Chicago Blackhawks, 2003</div>
+    <div class="player-stat">🏒 409 NHL games played</div>
+    <div class="player-stat">🏆 2× Stanley Cup Champion</div>
+    <div class="player-tagline">
+      Born on the very last day of the year in the most competitive 
+      hockey market in Quebec. Statistically, the type of player the 
+      system is designed to eliminate. He won the Stanley Cup twice.
+    </div>
+  </div>
+
+</div>
+')
+```
+---
+
+They are not anomalies. They are the visible tip of a pattern that has been running for forty years. For every Blake taken 70th, there are players of comparable talent who were never drafted at all because a coach at age twelve looked at two equally skilled children and chose the one born in January. Those players will never be known. Their talent was never wasted by them. It was wasted by the system.
+
+The data raises an uncomfortable question. If the bias is this consistent, this measurable, and this old why has it not been corrected? The players who slipped through anyway became some of the most decorated and durable of their generation. The ones the system preferred, on average, did not. Late-born players producing at junior level are not borderline talents. They are undervalued assets in a market that has been making the same mistake for four decades.
+
+<div class="callout">
+  The relative age effect is not a quirk of statistics. 
+  It is a forty-year structural bias hiding in plain sight. 
+  The birthday is not a proxy for talent. 
+  Pre-draft junior production, adjusted for birth quarter, is. 
+  The data has always been there. Now you have it.
+</div>
+
+---
+
+*Data sources: Hockey Databank (Master, Scoring, Goalies, AwardsPlayers), 
+NHL Draft Data (Kaggle — mattop), Elite Prospects Hockey Stats (Kaggle — mjavon), 
+SimpleMaps Canada Cities Population Data. Analysis covers NHL players active 
+between 1980 and 2016. Pre-draft statistics cover draftees between 1996 and 2016 
+with a minimum of 20 games played in the pre-draft season.*
+
+*Generative AI acknowledgement: Claude (Anthropic) was used to assist with data 
+pipeline development, visualisation code, narrative structure, and prose drafting. 
+All analysis, interpretations, and final editorial decisions are the author's own.*
